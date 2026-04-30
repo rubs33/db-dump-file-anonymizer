@@ -15,7 +15,7 @@ It is much faster than trying to run multiple `UPDATE` requests to a running DB,
 To install this library for usage, just run:
 
 ```
-composer require printi/db-dump-file-anonymizer
+composer create-project printi/db-dump-file-anonymizer
 ```
 
 ## Usage

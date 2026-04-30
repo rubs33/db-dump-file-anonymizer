@@ -3,7 +3,7 @@
     "description": "Library to anonymize a MySQL dump file using fake data",
     "type": "project",
     "keywords": ["database", "dump", "anonymization", "backup"],
-    "homepage": "https://github.com/printi/db-dump-file-anonymizer",
+    "homepage": "https://github.com/rubs33/db-dump-file-anonymizer",
     "license": "MIT",
     "authors": [
         {
