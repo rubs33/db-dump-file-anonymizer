@@ -100,6 +100,11 @@ final class ConfigTest extends TestCase
 
         // modifications_spec
         yield 'modifications_spec with table 0' => [['modifications_spec' => [0 => []]]];
+        yield 'modifications_spec with table spec "a"' => [['modifications_spec' => ['foo' => 'a']]];
+        yield 'modifications_spec with table spec null' => [['modifications_spec' => ['foo' => null]]];
+        yield 'modifications_spec with table spec 1' => [['modifications_spec' => ['foo' => 1]]];
+        yield 'modifications_spec with column spec "a"' => [['modifications_spec' => ['foo' => [1 => 'a']]]];
+        yield 'modifications_spec with column spec null' => [['modifications_spec' => ['foo' => [1 => null]]]];
         yield 'modifications_spec with column number "a"' => [['modifications_spec' => ['foo' => ['a' => []]]]];
         yield 'modifications_spec with empty format' => [['modifications_spec' => ['foo' => [1 => []]]]];
         yield 'modifications_spec with format false' => [['modifications_spec' => ['foo' => [1 => ['format' => false]]]]];

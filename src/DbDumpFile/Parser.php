@@ -37,6 +37,10 @@ class Parser
         TYPE_INSERT_END_TOKEN = 4,               // ";"
         TYPE_CHUNK_TOKEN = 5;                    // Any other sequence of chars
 
+    /** Chars accepted in sequences read by readChars */
+    private const WHITESPACE_CHARS = " \t\r\n",
+        NUMBER_CHARS = '0123456789.-e';
+
     /** Types of values */
     public const VALUE_TYPE_STRING = 'string',
         VALUE_TYPE_NUMBER = 'number',
@@ -55,6 +59,9 @@ class Parser
     /** @var string The buffer of data to keep in memory for parsing the input stream */
     private string $buffer;
 
+    /** @var int Position of the next byte to be read inside the buffer (bytes before it were already consumed) */
+    private int $bufferOffset;
+
     /** @var int Current position of the cursor in the input stream */
     private int $currentCursorPosition;
 
@@ -71,6 +78,7 @@ class Parser
         $this->setInputStream($inputStream);
         $this->setConfig($config);
         $this->buffer = '';
+        $this->bufferOffset = 0;
         $this->currentCursorPosition = 0;
     }
 
@@ -342,20 +350,7 @@ class Parser
      */
     protected function readNumberValue(): string
     {
-        $raw = '';
-        $endOfNumber = false;
-        while (!$this->isEndOfFile() && !$endOfNumber) {
-            $char = $this->checkBytesFromCurrentPosition(1, false);
-            $endOfNumber = $char !== '.'
-                && $char !== '-'
-                && !ctype_digit($char)
-                && $char !== 'e';
-            if (!$endOfNumber) {
-                $raw .= $this->readString($char, false);
-            }
-        }
-
-        return $raw;
+        return $this->readChars(self::NUMBER_CHARS);
     }
 
     /**
@@ -365,27 +360,28 @@ class Parser
      */
     protected function readStringValue(): string
     {
-        $raw = '';
-
         $stringDelimiter = $this->checkBytesFromCurrentPosition(1);
-
         $raw = $this->readString($stringDelimiter, false);
-        $endOfString = false;
-        while (!$this->isEndOfFile() && !$endOfString) {
-            $char = $this->checkBytesFromCurrentPosition(1, false);
+        $stopChars = '\\' . $stringDelimiter;
 
-            if ($char === '\\') {
-                $raw .= $this->readString($char, false);
+        while (!$this->isEndOfFile()) {
+            $this->ensureBuffered(1);
 
-                $specialChar = $this->checkBytesFromCurrentPosition(1);
-                $raw .= $this->readString($specialChar, false);
-                continue;
+            // Skip the whole sequence of bytes that are neither an escape nor the delimiter
+            $length = strcspn($this->buffer, $stopChars, $this->bufferOffset);
+            $raw .= $this->consumeBytes($length);
+            if ($this->bufferOffset === strlen($this->buffer)) {
+                continue; // The string continues in the next block (or the input ended)
             }
 
-            $endOfString = $char === $stringDelimiter;
-            if (!$endOfString) {
-                $raw .= $this->readString($char, false);
+            if ($this->buffer[$this->bufferOffset] !== '\\') {
+                break; // Delimiter found
             }
+
+            // Escape sequence: the backslash and the next byte (whatever it is)
+            $raw .= $this->consumeBytes(1);
+            $specialChar = $this->checkBytesFromCurrentPosition(1);
+            $raw .= $this->consumeBytes(strlen($specialChar));
         }
         $raw .= $this->readString($stringDelimiter, false);
 
@@ -400,23 +396,20 @@ class Parser
     protected function parseLine(): \Iterator
     {
         while (!$this->isEndOfFile()) {
-            $chunk = $this->checkBytesFromCurrentPosition($this->config['read_buffer_size'], false);
+            $this->ensureBuffered(1);
 
-            $newLinePosition = strpos($chunk, "\n");
+            $newLinePosition = strpos($this->buffer, "\n", $this->bufferOffset);
 
             if ($newLinePosition === false) {
-                $this->readString($chunk, false);
+                // No new line in the buffer: emit what is available and continue in the next block
                 yield [
                     'type' => self::TYPE_CHUNK_TOKEN,
-                    'raw' => $chunk,
+                    'raw' => $this->consumeBytes(strlen($this->buffer) - $this->bufferOffset),
                 ];
             } else {
-                $chunkPiece = substr($chunk, 0, $newLinePosition + 1);
-
-                $this->readString($chunkPiece, false);
                 yield [
                     'type' => self::TYPE_CHUNK_TOKEN,
-                    'raw' => $chunkPiece,
+                    'raw' => $this->consumeBytes($newLinePosition - $this->bufferOffset + 1),
                 ];
                 return;
             }
@@ -424,30 +417,67 @@ class Parser
     }
 
     /**
+     * Guarantee there are at least $size unread bytes in the buffer (unless the input stream reaches its end).
+     * The consumed part of the buffer is only discarded here, when it is necessary to read a new block,
+     * so the cost of discarding is paid once per block instead of once per read operation.
+     * @param int $size
+     * @return void
+     */
+    protected function ensureBuffered(int $size): void
+    {
+        $available = strlen($this->buffer) - $this->bufferOffset;
+        if ($available >= $size || feof($this->inputStream)) {
+            return;
+        }
+
+        if ($this->bufferOffset > 0) {
+            $this->buffer = $available > 0 ? substr($this->buffer, $this->bufferOffset) : '';
+            $this->bufferOffset = 0;
+        }
+
+        $blockSize = max($size, $this->config['read_buffer_size']);
+        while (strlen($this->buffer) < $size && !feof($this->inputStream)) {
+            $data = fread($this->inputStream, $blockSize);
+            if ($data === false) {
+                break;
+            }
+            $this->buffer .= $data;
+        }
+    }
+
+    /**
+     * Return the next bytes of the buffer and advance the cursor (bytes must be already buffered)
+     * @param int $length
+     * @return string
+     */
+    protected function consumeBytes(int $length): string
+    {
+        $bytes = substr($this->buffer, $this->bufferOffset, $length);
+        $this->bufferOffset += $length;
+        $this->currentCursorPosition += $length;
+
+        return $bytes;
+    }
+
+    /**
      * Read an amount of bytes from the current position of the stream, but do not advance the buffer cursor
-     * @param string $size Expected number of bytes to read
+     * @param int $size Expected number of bytes to read
      * @param bool $throwOnUnexpectedEof Whether to throw an exception when there is an unexpected end of file
      * @return string
      * @throws \RuntimeException
      */
     protected function checkBytesFromCurrentPosition(int $size, bool $throwOnUnexpectedEof = true): string
     {
-        while (
-            $size > strlen($this->buffer)
-            && !feof($this->inputStream)
-        ) {
-            $this->buffer .= fread($this->inputStream, $size - strlen($this->buffer));
-        }
+        $this->ensureBuffered($size);
 
         if (
             $throwOnUnexpectedEof
-            && strlen($this->buffer) < $size
-            && feof($this->inputStream)
+            && strlen($this->buffer) - $this->bufferOffset < $size
         ) {
             $this->throwUnexpectedEofException($size);
         }
 
-        return substr($this->buffer, 0, $size);
+        return substr($this->buffer, $this->bufferOffset, $size);
     }
 
     /**
@@ -468,10 +498,8 @@ class Parser
         ) {
             $this->throwUnexpectedStringException($str, $chunk);
         }
-        $this->buffer = substr($this->buffer, $strLen);
-        $this->currentCursorPosition += $strLen;
 
-        return $chunk;
+        return $this->consumeBytes($strLen);
     }
 
     /**
@@ -492,10 +520,8 @@ class Parser
         ) {
             $this->throwUnexpectedStringException($str, $chunk);
         }
-        $this->buffer = substr($this->buffer, $strLen);
-        $this->currentCursorPosition += $strLen;
 
-        return $chunk;
+        return $this->consumeBytes($strLen);
     }
 
     /**
@@ -506,7 +532,7 @@ class Parser
      */
     protected function readWhitespaces(int $minimumLength = 0): string
     {
-        $whitespaces = $this->readChars([' ', "\t", "\r", "\n"]);
+        $whitespaces = $this->readChars(self::WHITESPACE_CHARS);
 
         if (strlen($whitespaces) < $minimumLength) {
             $this->throwUnexpectedMinCharClassException('whitespaces', $minimumLength, strlen($whitespaces));
@@ -517,21 +543,22 @@ class Parser
 
     /**
      * Read a sequence of chars from current position of the stream and advance the buffer cursor
-     * @param array $chars
+     * @param string $mask The accepted chars (single-byte), concatenated in a string
      * @return string
      */
-    protected function readChars(array $chars): string
+    protected function readChars(string $mask): string
     {
         $raw = '';
 
-        $char = $this->checkBytesFromCurrentPosition(1, false);
-        while (in_array($char, $chars, true)) {
-            $raw .= $char;
-            $this->buffer = substr($this->buffer, 1);
-            $this->currentCursorPosition += 1;
+        do {
+            $this->ensureBuffered(1);
 
-            $char = $this->checkBytesFromCurrentPosition(1, false);
-        }
+            // Length of the initial segment formed only by accepted chars (scanned natively, without copies)
+            $length = strspn($this->buffer, $mask, $this->bufferOffset);
+            $raw .= $this->consumeBytes($length);
+
+            // Continue only if the sequence may go on in the next block
+        } while ($length > 0 && $this->bufferOffset === strlen($this->buffer) && !feof($this->inputStream));
 
         return $raw;
     }
@@ -542,7 +569,7 @@ class Parser
      */
     protected function isEndOfFile(): bool
     {
-        return $this->buffer === ''
+        return $this->bufferOffset >= strlen($this->buffer)
             && feof($this->inputStream);
     }
 

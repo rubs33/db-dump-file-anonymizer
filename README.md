@@ -61,7 +61,7 @@ $ php ./vendor/bin/anonymize-db-dump -i ./sample/dump.sql --stdout -f ./sample/m
 If you want to generate the modified dump file from the STDIN, you may replace `-i ./sample/dump.sql` by `--stdin`. This option is useful if you are getting the dump file from `mysqldump` directly like the example bellow:
 
 ```
-$ mysqldump ... | php ./vendor/bin/anonymize-db-dump --stdin --o ./sample/dump.out.sql -f ./sample/modifications.json -l pt_BR
+$ mysqldump ... | php ./vendor/bin/anonymize-db-dump --stdin -o ./sample/dump.out.sql -f ./sample/modifications.json -l pt_BR
 ```
 
 ## Specification of the JSON of modifications
