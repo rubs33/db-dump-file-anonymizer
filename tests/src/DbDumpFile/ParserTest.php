@@ -134,6 +134,7 @@ final class ParserTest extends TestCase
         yield 'Unexpected end of file (missing comma after string #1)' => ['INSERT INTO `foo` VALUES ("a"'];
         yield 'Unexpected end of file (missing comma after string #2)' => ["INSERT INTO `foo` VALUES ('a'"];
         yield 'Unexpected end of file (missing comma after NULL)' => ['INSERT INTO `foo` VALUES (NULL'];
+        yield 'Unexpected end of file (escape at the end of a string)' => ["INSERT INTO `foo` VALUES ('a\\"];
 
         yield 'Unexpected token (missing semicolon for insert statement)' => ['INSERT INTO `foo` VALUES (1) INSERT INTO `foo` VALUES (2);'];
         yield 'Unexpected token (missing value for tuple)' => ['INSERT INTO `foo` VALUES ();'];
@@ -145,6 +146,69 @@ final class ParserTest extends TestCase
         yield 'Unexpected token (missing comma after string)' => ['INSERT INTO `foo` VALUES ("a" 1);'];
         yield 'Unexpected token (missing comma after special string)' => ['INSERT INTO `foo` VALUES ("a\"b" 1);'];
         yield 'Unexpected token (missing comma after NULL)' => ['INSERT INTO `foo` VALUES (NULL 1);'];
+    }
+
+    public static function providerReadBufferSizes(): iterable
+    {
+        foreach ([1, 2, 3, 7, 64, 4096, Parser::DEFAULT_READ_BUFFER_SIZE] as $size) {
+            yield "read_buffer_size = {$size}" => [$size];
+        }
+    }
+
+    public static function providerInvalidInputContentWithSmallBuffers(): iterable
+    {
+        foreach (self::providerInvalidInputContent() as $name => [$content]) {
+            foreach ([1, 2, 3, 7] as $size) {
+                yield "{$name} / read_buffer_size = {$size}" => [$content, $size];
+            }
+        }
+    }
+
+    /**
+     * Content with values that cross the boundaries of small buffers
+     * (escapes, both string delimiters, long strings, long whitespace sequences, numbers, NULL and UTF-8).
+     * The tuples are repeated with different lengths, so the boundaries fall in different positions
+     * of each kind of value (the INSERT detection reads 250 bytes ahead, so short contents are fully buffered).
+     * @return array With 'content' (string), 'values' (expected values of each tuple) and 'separators'
+     */
+    private static function getBufferBoundaryFixture(): array
+    {
+        $tuples = [];
+        $values = [];
+        $separators = [];
+        for ($i = 1; $i <= 40; $i++) {
+            $padding = str_repeat('x', $i);
+            $whitespaces = str_repeat(" \n\t", $i % 5 + 1);
+            $number = '-' . str_repeat('1', $i % 7 + 1) . '.5e-3';
+            $tuples[] = "({$i},'O\\'Brien{$padding}','a\\\\b','end\\\\',\"double \\\" quotes\",'',NULL,null,{$number},"
+                . "'ação{$padding}\\n{$padding}'{$whitespaces})";
+            $values[] = [
+                1 => ['type' => 'number', 'raw' => (string) $i],
+                2 => ['type' => 'string', 'raw' => "'O\\'Brien{$padding}'"],
+                3 => ['type' => 'string', 'raw' => "'a\\\\b'"],
+                4 => ['type' => 'string', 'raw' => "'end\\\\'"],
+                5 => ['type' => 'string', 'raw' => '"double \" quotes"'],
+                6 => ['type' => 'string', 'raw' => "''"],
+                7 => ['type' => 'null', 'raw' => 'NULL'],
+                8 => ['type' => 'null', 'raw' => 'null'],
+                9 => ['type' => 'number', 'raw' => $number],
+                10 => ['type' => 'string', 'raw' => "'ação{$padding}\\n{$padding}'"],
+            ];
+            $separators[] = ',' . $whitespaces;
+        }
+        array_pop($separators);
+
+        $content = "-- header line longer than the small buffers\n"
+            . 'INSERT INTO `foo` VALUES ' . implode('', array_map(
+                fn($tuple, $separator) => $tuple . $separator,
+                $tuples,
+                array_merge($separators, ['']),
+            ))
+            . ";\n"
+            . "INSERT INTO `bar` VALUES ('" . str_repeat('z', 3000) . "');\n"
+            . '-- trailer without new line';
+
+        return ['content' => $content, 'values' => $values, 'separators' => $separators];
     }
 
     // Tests
@@ -344,6 +408,74 @@ EOF;
         $input = self::openFile('r+', true, $fileContent);
         $config = ['tables' => ['foo']];
         $parser = new Parser($input, $config);
+
+        // Expect
+        $this->expectException(\RuntimeException::class);
+
+        // Execute
+        foreach ($parser->parseTokens() as $token) {
+            // do nothing (only traverse the iterator to throw the expected exception)
+        }
+    }
+
+    /**
+     * @testdox Parsing values that cross the boundaries of the read buffer should work
+     * @dataProvider providerReadBufferSizes
+     */
+    public function testParseTokensWithValuesCrossingBufferBoundaries(int $readBufferSize): void
+    {
+        // Prepare
+        $fixture = self::getBufferBoundaryFixture();
+        $input = self::openFile('r+', true, $fixture['content']);
+        $parser = new Parser($input, ['tables' => ['foo'], 'read_buffer_size' => $readBufferSize]);
+
+        // Execute
+        $tokens = iterator_to_array($parser->parseTokens());
+
+        // Expect: no byte is lost or duplicated
+        $this->assertSame($fixture['content'], implode('', array_column($tokens, 'raw')));
+
+        // Expect: only the INSERT of the configured table is parsed
+        $tokensOfType = fn(int $type) => array_values(array_filter($tokens, fn($token) => $token['type'] === $type));
+        $this->assertSame(['foo'], array_column($tokensOfType(Parser::TYPE_INSERT_START_TOKEN), 'table'));
+
+        // Expect: the tuple values and the separators (with the whitespaces) are detected correctly
+        $this->assertSame($fixture['values'], array_column($tokensOfType(Parser::TYPE_INSERT_TUPLE_TOKEN), 'values'));
+        $this->assertSame($fixture['separators'], array_column($tokensOfType(Parser::TYPE_INSERT_TUPLE_SEPARATOR_TOKEN), 'raw'));
+    }
+
+    /**
+     * @testdox Parsing a line longer than the read buffer should keep the line intact
+     * @dataProvider providerReadBufferSizes
+     */
+    public function testParseTokensWithLinesLongerThanBuffer(int $readBufferSize): void
+    {
+        // Prepare
+        $fileContent = str_repeat('a', 5000) . "\n" . str_repeat('b', 10) . "\n\n" . str_repeat('c', 5000);
+        $input = self::openFile('r+', true, $fileContent);
+        $parser = new Parser($input, ['tables' => ['foo'], 'read_buffer_size' => $readBufferSize]);
+
+        // Execute
+        $tokens = iterator_to_array($parser->parseTokens());
+
+        // Expect
+        $this->assertSame($fileContent, implode('', array_column($tokens, 'raw')));
+        foreach ($tokens as $token) {
+            $this->assertSame(Parser::TYPE_CHUNK_TOKEN, $token['type']);
+            // A chunk token never contains a new line in the middle
+            $this->assertFalse(strpos(rtrim($token['raw'], "\n"), "\n"));
+        }
+    }
+
+    /**
+     * @testdox Parsing invalid input content with small buffers should break
+     * @dataProvider providerInvalidInputContentWithSmallBuffers
+     */
+    public function testExecuteWithInvalidInputContentAndSmallBuffersShouldBreak(string $fileContent, int $readBufferSize): void
+    {
+        // Prepare
+        $input = self::openFile('r+', true, $fileContent);
+        $parser = new Parser($input, ['tables' => ['foo'], 'read_buffer_size' => $readBufferSize]);
 
         // Expect
         $this->expectException(\RuntimeException::class);

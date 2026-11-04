@@ -130,9 +130,19 @@ try {
     if (empty($modifications)) {
         throw new \RuntimeException('Missing argument --modifications');
     }
-    $modificationsSpec = json_decode($modifications, true);
-    if ($modificationsSpec === false) {
-        throw new \RuntimeException('Failed to parse JSON argument "Modifications Spec"');
+    try {
+        $modificationsSpec = json_decode($modifications, true, 512, JSON_THROW_ON_ERROR);
+    } catch (\JsonException $e) {
+        throw new \RuntimeException(
+            sprintf('Failed to parse JSON argument "Modifications Spec": %s', $e->getMessage()),
+            0,
+            $e,
+        );
+    }
+    if (!is_array($modificationsSpec)) {
+        throw new \RuntimeException(
+            sprintf('Invalid JSON argument "Modifications Spec" (expected an object but got %s)', gettype($modificationsSpec)),
+        );
     }
 
     // Prepare data

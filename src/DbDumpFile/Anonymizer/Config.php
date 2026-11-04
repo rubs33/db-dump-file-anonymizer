@@ -291,11 +291,17 @@ class Config
             if (!is_string($table) || preg_match('#[./]#i', $table)) {
                 $this->throwInvalidTableNameException($table);
             }
+            if (!is_array($columnsSpec)) {
+                $this->throwInvalidTableSpecTypeException($table, gettype($columnsSpec));
+            }
             $this->modificationsSpec[$table] = [];
 
             foreach ($columnsSpec as $columnNumber => $columnSpec) {
                 if (!is_numeric($columnNumber) || $columnNumber < 1) {
                     $this->throwInvalidColumnNumberException($table, $columnNumber);
+                }
+                if (!is_array($columnSpec)) {
+                    $this->throwInvalidColumnSpecTypeException($table, $columnNumber, gettype($columnSpec));
                 }
                 if (array_key_exists('quote', $columnSpec) && !is_bool($columnSpec['quote'])) {
                     $this->throwInvalidQuotingFlagException($table, $columnNumber, $columnSpec['quote']);
@@ -358,6 +364,33 @@ class Config
             sprintf(
                 'Invalid table name: %s',
                 var_export($table, true),
+            ),
+        );
+    }
+
+    /** @throws \InvalidArgumentException */
+    #[CodeCoverageIgnore]
+    protected function throwInvalidTableSpecTypeException($table, string $type): void
+    {
+        throw new \InvalidArgumentException(
+            sprintf(
+                'Invalid type for the spec of table %s in modifications spec: %s (expected array)',
+                var_export($table, true),
+                $type,
+            ),
+        );
+    }
+
+    /** @throws \InvalidArgumentException */
+    #[CodeCoverageIgnore]
+    protected function throwInvalidColumnSpecTypeException($table, $columnNumber, string $type): void
+    {
+        throw new \InvalidArgumentException(
+            sprintf(
+                'Invalid type for the spec of table %s / column %s in modifications spec: %s (expected array)',
+                var_export($table, true),
+                var_export($columnNumber, true),
+                $type,
             ),
         );
     }
